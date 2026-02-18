@@ -92,16 +92,23 @@ Query ─┬──▶ BM25Retriever (keyword, top-10) ─┐
   - **snippet**: first 200 chars of the matched chunk text
   - **page_number**: from chunk metadata
 
+**Streaming & citation cleaning:**
+- Answers are streamed token-by-token via `st.write_stream` for low-latency UX.
+- A buffering layer holds tokens inside `[...]` brackets, strips citation markers
+  and chunk metadata headers before yielding to the UI.
+- The `_clean_citation_tags()` method also repairs orphaned grammar left behind
+  by citation removal (e.g. "According to ," → "According to the document,").
+
 **Failure behavior:**
-- **No chunks retrieved** (empty collection): Returns a canned refusal —
+- **No chunks retrieved + no memory**: Returns a canned refusal —
   *"I don't have enough information in the uploaded documents to answer this
   question."* — with zero citations.
-- **Chunks retrieved but irrelevant**: The system prompt says "Do NOT guess,
-  speculate, or use general knowledge" and "If the context chunks do NOT contain
-  the answer, respond EXACTLY with the refusal phrase." No fake citations are
-  produced (Rule 4: "Do NOT produce citations pointing to information not in
-  the chunks").
+- **No chunks but memory available**: The LLM answers from stored memory facts
+  without adding citation markers.
+- **Chunks retrieved but irrelevant**: The system prompt enforces grounding rules.
+  No fake citations are produced.
 - **LLM error**: Caught by try/except — returns a graceful error message.
+- **Stale ChromaDB reference**: Auto-detected and self-healed by the retriever.
 
 ---
 
@@ -193,14 +200,14 @@ START ──▶ │  analyze   │──▶ should_write=False ──▶ END
 | Reranker | FlashRank | cross-encoder/ms-marco | Lighter, no GPU, <50 ms per batch |
 | Memory | LangGraph state machine | Simple if/else | Explicit graph is auditable, testable, extensible |
 | Retrieval | Hybrid BM25 + semantic | Semantic only | BM25 catches exact entity names embedders miss |
-| Injection defense | System prompt rules | Input sanitization | Defence-in-depth at the prompt layer |
+| RAGAS eval | Faithfulness only | Faithfulness + relevancy | Relevancy requires embeddings — too slow on local Ollama |
+| Streaming | Buffer + strip citations | Post-process only | Users see clean text in real-time without citation noise |
 
 ### What we would improve with more time:
 
 - **pgvector** for production-grade vector storage with SQL filtering
-- **Streaming responses** via Streamlit's `st.write_stream` for better UX latency
 - **Multi-user isolation** with session-scoped ChromaDB collections
 - **Ground-truth evaluation harness** with gold answers for automated scoring
-- **Tool-use agent loop** using LangGraph to auto-detect weather queries from chat
 - **Input sanitization layer** to complement prompt-level injection defense
 - **Chunk-level confidence scoring** to suppress low-relevance chunks before LLM
+- **Conversation persistence** with SQLite-backed chat history across sessions

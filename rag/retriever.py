@@ -126,7 +126,11 @@ class HybridRetriever:
             chunks = self._docs_to_chunks(results[:top_k])
             logger.info("Hybrid search '{}' → {} chunks", query[:60], len(chunks))
             return chunks
-        except Exception:
+        except Exception as exc:
+            if "does not exist" in str(exc):
+                logger.warning("Stale collection reference — resetting retriever")
+                self.reset()
+                return []
             logger.exception("Hybrid search failed for '{}'", query[:60])
             return []
 
@@ -149,6 +153,21 @@ class HybridRetriever:
                 )
             )
         return chunks
+
+    def reset(self) -> None:
+        """Re-bind to the (possibly recreated) ChromaDB collection and clear indexes."""
+        self._collection = self._chroma_client.get_or_create_collection(
+            name=CHROMA_COLLECTION,
+        )
+        self._lc_vectorstore = Chroma(
+            client=self._chroma_client,
+            collection_name=CHROMA_COLLECTION,
+            embedding_function=self._embed_fn,
+        )
+        self._bm25_retriever = None
+        self._ensemble = None
+        self.build_bm25_index()
+        logger.info("HybridRetriever reset — re-bound to collection")
 
     def set_weights(self, bm25_weight: float) -> None:
         """Update fusion weights and rebuild the ensemble retriever."""

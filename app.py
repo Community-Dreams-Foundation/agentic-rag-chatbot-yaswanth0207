@@ -1,13 +1,12 @@
-"""Streamlit UI for the Agentic RAG Chatbot.
-
-Provides document upload & indexing, chat with grounded citations,
-agentic memory persistence, weather analysis, and optional RAGAS evaluation.
-"""
+"""Streamlit UI for the Agentic RAG Chatbot."""
 
 from __future__ import annotations
 
 import os
+import re
 import tempfile
+import time
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -15,7 +14,18 @@ import streamlit as st
 from dotenv import load_dotenv
 from loguru import logger
 
+from models.schemas import RAGResponse
+
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+CITATION_PATTERN = re.compile(r"\[source:\s*(.+?),\s*chunk(?:_id)?[=:]\s*(.+?)(?:,\s*page[=:]\s*\d+)?\]")
+ALL_CITATION_TAGS = re.compile(r"\[source:[^\]]*\]", re.DOTALL)
+CHUNK_HEADER_PATTERN = re.compile(r"\[\d+\]\s*source=.+?chunk_id=\S+\s*page=\d+\s*")
+WEATHER_PATTERN = re.compile(
+    r"\b(?:weather|temperature|forecast|rain|snow|wind|humid|climate)\b.*\b(?:in|for|at|of)\s+([A-Z][a-zA-Z\s]{2,30})\b",
+    re.IGNORECASE,
+)
+NO_INFO_PHRASE = "I don't have enough information in the uploaded documents to answer this question."
 
 # ---------------------------------------------------------------------------
 # Environment & page config
@@ -30,6 +40,16 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# Custom CSS for polish
+st.markdown("""
+<style>
+    .stChatMessage { border-radius: 12px; }
+    .block-container { padding-top: 2rem; }
+    div[data-testid="stMetric"] { background: rgba(28,131,225,0.05); border-radius: 8px; padding: 8px 12px; }
+    div[data-testid="stExpander"] { border-radius: 8px; }
+</style>
+""", unsafe_allow_html=True)
+
 # ---------------------------------------------------------------------------
 # Ollama check
 # ---------------------------------------------------------------------------
@@ -43,12 +63,11 @@ except Exception:
     st.stop()
 
 # ---------------------------------------------------------------------------
-# Lazy component initialisation (cached in session state)
+# Lazy component initialisation
 # ---------------------------------------------------------------------------
 
 
 def _init_components() -> None:
-    """Lazily initialise heavy components once per session."""
     if "components_ready" in st.session_state:
         return
 
@@ -73,7 +92,6 @@ def _init_components() -> None:
 
 _init_components()
 
-# Shorthand accessors
 ingestor = st.session_state["ingestor"]
 retriever = st.session_state["retriever"]
 reranker = st.session_state["reranker"]
@@ -82,16 +100,117 @@ evaluator = st.session_state["evaluator"]
 memory_writer = st.session_state["memory_writer"]
 weather_tool = st.session_state["weather_tool"]
 
-# Session defaults
 st.session_state.setdefault("messages", [])
 st.session_state.setdefault("indexed_sources", {})
+st.session_state.setdefault("suggestions", [])
+st.session_state.setdefault("eval_history", [])
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _detect_weather_query(text: str) -> str | None:
+    m = WEATHER_PATTERN.search(text)
+    return m.group(1).strip() if m else None
+
+
+def _strip_citation_markers(text: str) -> str:
+    text = ALL_CITATION_TAGS.sub("", text)
+    text = CHUNK_HEADER_PATTERN.sub("", text)
+    text = re.sub(r"According to\s*,", "According to the document,", text)
+    text = re.sub(r" {2,}", " ", text)
+    text = re.sub(r"\s+,", ",", text)
+    return text.strip()
+
+
+def _strip_trailing_no_info(text: str) -> str:
+    lines = text.strip().split("\n")
+    if len(lines) > 1 and NO_INFO_PHRASE in lines[-1]:
+        return "\n".join(lines[:-1]).strip()
+    return text
+
+
+def _build_conversation_context(messages: list[dict], max_turns: int = 3) -> str:
+    recent = [m for m in messages if m["role"] in ("user", "assistant")][-max_turns * 2:]
+    if not recent:
+        return ""
+    parts = []
+    for m in recent:
+        role = "User" if m["role"] == "user" else "Assistant"
+        content = m["content"][:300]
+        parts.append(f"{role}: {content}")
+    return (
+        "--- PRIOR CONVERSATION (for context only — do NOT cite this section) ---\n"
+        + "\n".join(parts)
+    )
+
+
+def _generate_suggestions(answerer_obj, chunks_summary: str) -> list[str]:
+    try:
+        from langchain_core.prompts import ChatPromptTemplate
+        prompt = ChatPromptTemplate.from_template(
+            "Given this document summary, suggest exactly 4 short questions a user might ask. "
+            "Return ONLY the questions, one per line, no numbering.\n\n{summary}"
+        )
+        chain = prompt | answerer_obj._llm
+        result = chain.invoke({"summary": chunks_summary[:1500]})
+        raw = result.content or ""
+        questions = [q.strip().lstrip("0123456789.-) ") for q in raw.strip().split("\n") if q.strip()]
+        return questions[:4]
+    except Exception:
+        return []
+
+
+def _render_citations(citations: list[dict], full_chunks: list[dict] | None = None) -> None:
+    chunk_map = {}
+    if full_chunks:
+        chunk_map = {c["chunk_id"]: c["text"] for c in full_chunks}
+
+    for cit in citations:
+        src = cit.get("source", "unknown")
+        page = cit.get("page_number", 0)
+        cid = cit.get("chunk_id", "?")
+        label = f"📄 {src} · page {page}" if page else f"📄 {src}"
+        with st.expander(label, expanded=False):
+            full_text = chunk_map.get(cid, cit.get("snippet", ""))
+            st.markdown(full_text if full_text else "_No text available_")
+            st.caption(f"chunk: `{cid}`")
+
+
+def _render_pipeline_trace(trace: dict) -> None:
+    cols = st.columns(len(trace))
+    for col, (stage, ms) in zip(cols, trace.items()):
+        col.metric(stage, f"{ms:.0f} ms")
+
+
+def _export_chat_markdown(messages: list[dict]) -> str:
+    lines = [f"# Chat Export — {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"]
+    for msg in messages:
+        role = "**You**" if msg["role"] == "user" else "**Assistant**"
+        lines.append(f"### {role}\n")
+        lines.append(msg["content"] + "\n")
+        if msg.get("citations"):
+            lines.append("**Citations:**\n")
+            for c in msg["citations"]:
+                lines.append(f"- {c['source']} (page {c['page_number']}, chunk `{c['chunk_id']}`)")
+            lines.append("")
+        lines.append("---\n")
+    return "\n".join(lines)
+
+
+def _read_memory_facts(path: Path) -> list[str]:
+    try:
+        text = path.read_text(encoding="utf-8")
+        return [l.strip() for l in text.splitlines() if l.strip().startswith("- ")]
+    except FileNotFoundError:
+        return []
+
 
 # ---------------------------------------------------------------------------
 # Sidebar
 # ---------------------------------------------------------------------------
 
 with st.sidebar:
-    # ── Document Manager ──────────────────────────────────────────────
     st.header("📁 Document Manager")
 
     uploaded_files = st.file_uploader(
@@ -101,18 +220,34 @@ with st.sidebar:
     )
 
     if st.button("📥 Index Files", disabled=not uploaded_files, use_container_width=True):
-        for uf in uploaded_files:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uf.name).suffix) as tmp:
-                tmp.write(uf.read())
-                tmp_path = tmp.name
+        already_indexed = set(st.session_state["indexed_sources"].keys())
+        new_files = [uf for uf in uploaded_files if uf.name not in already_indexed]
 
-            with st.spinner(f"Indexing **{uf.name}** …"):
-                chunks = ingestor.ingest_file(tmp_path, original_filename=uf.name)
-                retriever.build_bm25_index()
-                st.session_state["indexed_sources"][uf.name] = chunks
-                st.success(f"✅ Indexed **{chunks}** chunks from **{uf.name}**")
+        if not new_files:
+            st.info("All files already indexed.")
+        else:
+            sample_texts: list[str] = []
+            for uf in new_files:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uf.name).suffix) as tmp:
+                    tmp.write(uf.read())
+                    tmp_path = tmp.name
 
-            os.unlink(tmp_path)
+                with st.spinner(f"Indexing **{uf.name}** …"):
+                    chunks = ingestor.ingest_file(tmp_path, original_filename=uf.name)
+                    retriever.build_bm25_index()
+                    st.session_state["indexed_sources"][uf.name] = chunks
+                    st.success(f"✅ Indexed **{chunks}** chunks from **{uf.name}**")
+
+                    docs = ingestor.parse_file(tmp_path)
+                    for d in docs[:2]:
+                        sample_texts.append(d.text[:500])
+
+                os.unlink(tmp_path)
+
+            if sample_texts:
+                with st.spinner("Generating suggested questions …"):
+                    suggestions = _generate_suggestions(answerer, "\n".join(sample_texts))
+                    st.session_state["suggestions"] = suggestions
 
     with st.expander("📂 Indexed Documents"):
         sources = st.session_state["indexed_sources"]
@@ -124,36 +259,58 @@ with st.sidebar:
 
     if st.button("🗑️ Clear All Documents", use_container_width=True):
         ingestor.clear()
+        retriever.reset()
         st.session_state["indexed_sources"] = {}
         st.session_state["messages"] = []
+        st.session_state["suggestions"] = []
         st.toast("Cleared all documents and chat history.")
 
     st.divider()
 
-    # ── Weather Analysis ──────────────────────────────────────────────
+    # ── Weather Analysis (sidebar) ───────────────────────────────────
     st.header("🌤️ Weather Analysis")
-    city = st.text_input("City Name", placeholder="e.g. Tokyo, Austin, London")
-    days = st.slider("Forecast Days", min_value=1, max_value=16, value=7)
+    city_input = st.text_input("City Name", placeholder="e.g. Tokyo, Austin, London")
+    forecast_days = st.slider("Forecast Days", min_value=1, max_value=16, value=7)
 
-    if st.button("🔍 Analyze Weather", disabled=not city, use_container_width=True):
-        with st.spinner(f"Fetching weather for **{city}** …"):
-            result = weather_tool.run(city, days=days)
+    if st.button("🔍 Analyze Weather", disabled=not city_input, use_container_width=True):
+        with st.spinner(f"Fetching weather for **{city_input}** …"):
+            w_result = weather_tool.run(city_input, days=forecast_days)
 
-        st.caption(f"📍 Detected: {result.location}")
-        st.info(result.explanation)
+        st.caption(f"📍 Detected: {w_result.location}")
+        st.info(w_result.explanation)
 
-        if result.daily_summary:
-            df = pd.DataFrame([s.model_dump() for s in result.daily_summary])
+        if w_result.daily_summary:
+            wdf = pd.DataFrame([s.model_dump() for s in w_result.daily_summary])
 
             st.subheader("🌡️ Daily Average Temperature")
-            st.line_chart(df.set_index("date")["avg_temp"])
+            st.line_chart(wdf.set_index("date")["avg_temp"])
 
             st.subheader("🌧️ Daily Precipitation")
-            st.bar_chart(df.set_index("date")["total_precipitation"])
+            st.bar_chart(wdf.set_index("date")["total_precipitation"])
 
-            anomalies = [s.date for s in result.daily_summary if s.is_anomaly]
+            anomalies = [s.date for s in w_result.daily_summary if s.is_anomaly]
             if anomalies:
-                st.warning(f"⚠️ Anomaly days detected: {', '.join(anomalies)}")
+                st.warning(f"⚠️ Anomaly days: {', '.join(anomalies)}")
+
+    st.divider()
+
+    # ── Memory Viewer (reads fresh from disk every render) ────────────
+    st.header("🧠 Memory Viewer")
+    mem_tab_user, mem_tab_company = st.tabs(["User", "Company"])
+    with mem_tab_user:
+        user_facts = _read_memory_facts(Path("USER_MEMORY.md"))
+        if user_facts:
+            for f in user_facts:
+                st.markdown(f)
+        else:
+            st.caption("No user memories yet.")
+    with mem_tab_company:
+        co_facts = _read_memory_facts(Path("COMPANY_MEMORY.md"))
+        if co_facts:
+            for f in co_facts:
+                st.markdown(f)
+        else:
+            st.caption("No company memories yet.")
 
     st.divider()
 
@@ -167,14 +324,58 @@ with st.sidebar:
         step=0.1,
     )
     top_k = st.slider("Retrieved Chunks", min_value=3, max_value=10, value=5)
-    show_eval = st.toggle("Show RAGAS Evaluation Scores", value=False)
+    show_eval = st.toggle(
+        "Show RAGAS Evaluation Scores",
+        value=st.session_state.get("show_ragas", False),
+        key="show_ragas_toggle",
+    )
+    st.session_state["show_ragas"] = show_eval
+
+    st.divider()
+
+    if st.session_state["messages"]:
+        md_export = _export_chat_markdown(st.session_state["messages"])
+        st.download_button(
+            "📥 Export Chat",
+            data=md_export,
+            file_name=f"chat_export_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
+            mime="text/markdown",
+            use_container_width=True,
+        )
 
 # ---------------------------------------------------------------------------
 # Main area
 # ---------------------------------------------------------------------------
 
 st.title("🤖 Agentic RAG Chatbot")
-st.caption("Upload documents and ask questions with source citations")
+st.caption("Upload documents and ask questions · Weather queries auto-detected · Memory persists across sessions")
+
+# Suggested questions
+if st.session_state.get("suggestions"):
+    cols = st.columns(len(st.session_state["suggestions"]))
+    for i, (col, q) in enumerate(zip(cols, st.session_state["suggestions"])):
+        if col.button(f"💡 {q}", key=f"suggestion_{i}", use_container_width=True):
+            st.session_state["_prefill_query"] = q
+            st.rerun()
+
+# Empty state — welcoming UI when no messages yet
+if not st.session_state["messages"]:
+    st.markdown("")
+    col_l, col_c, col_r = st.columns([1, 2, 1])
+    with col_c:
+        st.markdown(
+            """
+            <div style="text-align:center; padding: 3rem 1rem 2rem 1rem; opacity: 0.7;">
+                <div style="font-size: 3rem; margin-bottom: 0.5rem;">📄 🔍 🤖</div>
+                <h3 style="margin-bottom: 0.5rem;">Welcome!</h3>
+                <p>Upload a document in the sidebar, then ask a question below.</p>
+                <p style="font-size: 0.85rem; margin-top: 1rem;">
+                    Try: <em>"Summarize the main findings"</em> · <em>"What are the key metrics?"</em> · <em>"Weather in Tokyo"</em>
+                </p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
 # Chat history
 for msg in st.session_state["messages"]:
@@ -182,79 +383,211 @@ for msg in st.session_state["messages"]:
         st.markdown(msg["content"])
         if msg.get("citations"):
             with st.expander(f"📎 {len(msg['citations'])} Citation(s)"):
-                for cit in msg["citations"]:
-                    st.info(
-                        f"**{cit['source']}** (page {cit['page_number']})  \n"
-                        f"chunk: `{cit['chunk_id']}`  \n"
-                        f"_{cit['snippet'][:200]}_"
-                    )
+                _render_citations(msg["citations"], msg.get("full_chunks"))
+        if msg.get("pipeline_trace"):
+            with st.expander("⚡ Pipeline Trace"):
+                _render_pipeline_trace(msg["pipeline_trace"])
+        if msg.get("retrieval_debug"):
+            with st.expander("🔍 Retrieval Transparency"):
+                df = pd.DataFrame(msg["retrieval_debug"])
+                if "rerank_score" in df.columns:
+                    df = df.sort_values("rerank_score", ascending=False)
+                st.dataframe(df, use_container_width=True)
         if msg.get("eval_scores"):
-            cols = st.columns(len(msg["eval_scores"]))
-            for col, (metric, score) in zip(cols, msg["eval_scores"].items()):
-                col.metric(metric, f"{score:.2f}")
+            with st.expander("📊 RAG Quality Scores"):
+                scores = msg["eval_scores"]
+                score_cols = st.columns(len(scores))
+                for sc, (metric, val) in zip(score_cols, scores.items()):
+                    sc.metric(metric, f"{val:.0%}")
+                overall = sum(scores.values()) / max(len(scores), 1)
+                st.progress(overall, text=f"Overall: {overall:.0%}")
+        if msg.get("weather"):
+            w = msg["weather"]
+            st.info(w.get("explanation", ""))
+            if w.get("daily"):
+                wdf = pd.DataFrame(w["daily"])
+                st.subheader("🌡️ Temperature Trend")
+                st.line_chart(wdf.set_index("date")["avg_temp"])
+                st.subheader("🌧️ Precipitation")
+                st.bar_chart(wdf.set_index("date")["total_precipitation"])
 
 # User input
-if prompt := st.chat_input("Ask a question about your documents …"):
+prefill = st.session_state.pop("_prefill_query", None)
+if prompt := st.chat_input("Ask about your documents, or try: 'weather in London' …"):
+    pass
+elif prefill:
+    prompt = prefill
+
+if prompt:
     st.session_state["messages"].append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Update hybrid weights if changed
-    retriever.set_weights(alpha)
+    city = _detect_weather_query(prompt)
 
-    with st.chat_message("assistant"):
-        with st.spinner("🔍 Retrieving and reasoning …"):
-            chunks = retriever.hybrid_search(prompt, top_k=top_k)
-            reranked = reranker.rerank(prompt, chunks, top_k=top_k)
-            response = answerer.answer(prompt, reranked)
+    if city:
+        # ── Weather path ──────────────────────────────────────────────
+        with st.chat_message("assistant"):
+            with st.spinner(f"🌤️ Fetching weather for **{city}** …"):
+                result = weather_tool.run(city, days=7)
 
-        # Memory (run before display so we can adjust the answer)
-        with st.spinner("💾 Checking memory …"):
-            written, target = memory_writer.process(prompt, response.answer)
-        if written:
+            st.markdown(f"**Weather for {result.location}:**")
+            st.info(result.explanation)
+
+            weather_data: dict = {"explanation": result.explanation, "daily": []}
+            if result.daily_summary:
+                wdf = pd.DataFrame([s.model_dump() for s in result.daily_summary])
+                weather_data["daily"] = [s.model_dump() for s in result.daily_summary]
+
+                st.subheader("🌡️ Temperature Trend")
+                st.line_chart(wdf.set_index("date")["avg_temp"])
+
+                st.subheader("🌧️ Precipitation")
+                st.bar_chart(wdf.set_index("date")["total_precipitation"])
+
+                anomalies = [s.date for s in result.daily_summary if s.is_anomaly]
+                if anomalies:
+                    st.warning(f"⚠️ Anomaly days: {', '.join(anomalies)}")
+
+            st.session_state["messages"].append({
+                "role": "assistant",
+                "content": f"**Weather for {result.location}:** {result.explanation[:200]}…",
+                "weather": weather_data,
+                "citations": [],
+                "eval_scores": {},
+            })
+    else:
+        # ── RAG path ─────────────────────────────────────────────────
+        retriever.set_weights(alpha)
+        pipeline_trace: dict[str, float] = {}
+
+        with st.chat_message("assistant"):
+            # Retrieval
+            with st.spinner("🔍 Searching documents …"):
+                t0 = time.perf_counter()
+                chunks = retriever.hybrid_search(prompt, top_k=top_k)
+                pipeline_trace["Retrieval"] = (time.perf_counter() - t0) * 1000
+
+                t0 = time.perf_counter()
+                reranked = reranker.rerank(prompt, chunks, top_k=top_k)
+                pipeline_trace["Rerank"] = (time.perf_counter() - t0) * 1000
+
+            # Ensure memory is fresh before answering
             answerer.reload_memory()
 
-        no_doc_answer = "I don't have enough information" in response.answer
-        display_answer = response.answer
-        if written and no_doc_answer:
-            display_answer = (
-                f"Thanks for sharing! I've noted that in my **{target}** memory "
-                f"and will remember it for future conversations.\n\n"
-                f"*(That said, this isn't related to your uploaded documents — "
-                f"feel free to ask me anything about them!)*"
+            # Conversation context
+            conv_context = _build_conversation_context(st.session_state["messages"])
+            answerer._conversation_context = conv_context or ""
+
+            # Stream the answer with a status indicator
+            t0 = time.perf_counter()
+            result_container: dict[str, RAGResponse] = {}
+            stream_generator = answerer.stream_answer(prompt, reranked, result_container)
+
+            with st.status("🧠 Thinking …", expanded=True) as status:
+                raw_display = st.write_stream(stream_generator)
+                status.update(label="✅ Done", state="complete", expanded=True)
+
+            pipeline_trace["Generation"] = (time.perf_counter() - t0) * 1000
+
+            response = result_container.get("response")
+            if not response:
+                response = answerer.answer(prompt, reranked)
+
+            clean_answer = _strip_trailing_no_info(
+                _strip_citation_markers(response.answer)
             )
 
-        st.markdown(display_answer)
+            # Memory
+            t0 = time.perf_counter()
+            with st.spinner("💾 Checking memory …"):
+                written, target = memory_writer.process(prompt, clean_answer)
+            pipeline_trace["Memory"] = (time.perf_counter() - t0) * 1000
 
-        if written:
-            st.success(f"💾 Saved to **{target}** memory")
+            if written:
+                answerer.reload_memory()
 
-        citation_dicts = [c.model_dump() for c in response.citations]
-        if response.citations:
-            with st.expander(f"📎 {len(response.citations)} Citation(s)"):
-                for cit in response.citations:
-                    st.info(
-                        f"**{cit.source}** (page {cit.page_number})  \n"
-                        f"chunk: `{cit.chunk_id}`  \n"
-                        f"_{cit.snippet[:200]}_"
-                    )
+            no_doc_answer = NO_INFO_PHRASE in response.answer and not response.citations
+            if written and no_doc_answer:
+                st.info(
+                    f"💾 Thanks for sharing! I've noted that in my **{target}** memory "
+                    f"and will remember it for future conversations."
+                )
+            elif written:
+                st.success(f"💾 Saved to **{target}** memory")
 
-        # RAGAS evaluation
-        eval_scores: dict = {}
-        if show_eval and response.citations:
-            with st.spinner("📊 Running RAGAS evaluation …"):
-                contexts = [c.text for c in reranked]
-                eval_scores = evaluator.evaluate(prompt, response.answer, contexts)
-            if eval_scores:
-                cols = st.columns(len(eval_scores))
-                for col, (metric, score) in zip(cols, eval_scores.items()):
-                    col.metric(metric, f"{score:.2f}")
+            # Citations
+            citation_dicts = [c.model_dump() for c in response.citations]
+            full_chunks = [{"chunk_id": c.chunk_id, "text": c.text} for c in reranked]
+            if response.citations:
+                with st.expander(f"📎 {len(response.citations)} Citation(s)"):
+                    _render_citations(citation_dicts, full_chunks)
 
-        st.session_state["messages"].append(
-            {
+            # Pipeline trace
+            with st.expander("⚡ Pipeline Trace"):
+                _render_pipeline_trace(pipeline_trace)
+
+            # Retrieval transparency
+            used_chunk_ids = {c.chunk_id for c in response.citations}
+            retrieval_debug = [
+                {
+                    "source": c.source,
+                    "chunk_id": c.chunk_id,
+                    "cited": "✅" if c.chunk_id in used_chunk_ids else "",
+                    "rerank_score": round(c.score, 4),
+                    "snippet": c.text[:120],
+                }
+                for c in reranked
+            ]
+            if retrieval_debug:
+                with st.expander("🔍 Retrieval Transparency"):
+                    rdf = pd.DataFrame(retrieval_debug)
+                    st.dataframe(rdf, use_container_width=True)
+
+            # RAGAS evaluation
+            eval_scores: dict = {}
+            if show_eval and reranked:
+                with st.spinner("📊 Evaluating faithfulness (up to 90s) …"):
+                    try:
+                        contexts = [c.text for c in reranked]
+                        eval_scores = evaluator.evaluate(prompt, clean_answer, contexts)
+                    except Exception:
+                        logger.exception("RAGAS evaluation failed")
+                        eval_scores = {}
+
+                if eval_scores:
+                    st.session_state["eval_history"].append({
+                        "question": prompt[:50] + ("…" if len(prompt) > 50 else ""),
+                        **eval_scores,
+                        "timestamp": datetime.now().strftime("%H:%M:%S"),
+                    })
+
+                    with st.expander("📊 RAG Quality Scores", expanded=True):
+                        score_cols = st.columns(len(eval_scores))
+                        for sc, (metric, val) in zip(score_cols, eval_scores.items()):
+                            label = metric.replace("_", " ").title()
+                            sc.metric(label, f"{val:.0%}")
+                        overall = sum(eval_scores.values()) / max(len(eval_scores), 1)
+                        st.progress(overall, text=f"Overall Quality: {overall:.0%}")
+                        if overall >= 0.8:
+                            st.success("Excellent — answer is well-grounded in sources")
+                        elif overall >= 0.6:
+                            st.warning("Good — mostly grounded in sources")
+                        else:
+                            st.error("Low — try rephrasing or uploading more relevant docs")
+                else:
+                    st.caption("⚠️ Evaluation returned no scores — try a different question")
+
+            st.session_state["messages"].append({
                 "role": "assistant",
-                "content": display_answer,
+                "content": clean_answer,
                 "citations": citation_dicts,
+                "full_chunks": full_chunks,
                 "eval_scores": eval_scores,
-            }
-        )
+                "retrieval_debug": retrieval_debug,
+                "pipeline_trace": pipeline_trace,
+            })
+
+    # Force a rerun so sidebar memory viewer refreshes immediately
+    if prompt:
+        st.rerun()

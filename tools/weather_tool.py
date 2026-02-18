@@ -2,7 +2,7 @@
 
 Fetches hourly weather data, computes daily aggregates with rolling
 averages and anomaly detection, then generates a friendly explanation
-via OpenAI.
+via Ollama (Llama 3.2).
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ Data:
 
 
 class WeatherTool:
-    """Fetches, analyses, and explains weather data via Open-Meteo + OpenAI."""
+    """Fetches, analyses, and explains weather data via Open-Meteo + Ollama."""
 
     def __init__(self) -> None:
         logger.info("Initialising WeatherTool")
@@ -169,7 +169,7 @@ class WeatherTool:
     # ------------------------------------------------------------------
 
     def explain(self, analysis: dict, location_name: str) -> str:
-        """Generate a friendly weather explanation via OpenAI."""
+        """Generate a friendly weather explanation via Ollama."""
         try:
             prompt = ChatPromptTemplate.from_template(EXPLAIN_PROMPT)
             chain = prompt | self._llm

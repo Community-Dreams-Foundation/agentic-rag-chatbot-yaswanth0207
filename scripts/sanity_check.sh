@@ -23,3 +23,4 @@ python3 scripts/verify_output.py "$OUT"
 echo "================================"
 echo "All checks passed!"
 echo "================================"
+    

@@ -22,7 +22,9 @@ class Chunk(BaseModel):
     source: str
     chunk_id: str
     page_number: int = 0
-    score: float = 0.0
+    score: float = 0.0  # Reranker score
+    bm25_score: float = 0.0
+    semantic_score: float = 0.0
 
 
 class Citation(BaseModel):

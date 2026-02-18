@@ -7,6 +7,8 @@ quality signal for the retrieval-augmented generation pipeline.
 from __future__ import annotations
 
 import os
+import signal
+from contextlib import contextmanager
 
 from loguru import logger
 
@@ -15,8 +17,24 @@ from loguru import logger
 # ---------------------------------------------------------------------------
 
 OLLAMA_MODEL = "llama3.2"
+EVAL_TIMEOUT_SECONDS = 90
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+
+@contextmanager
+def _timeout(seconds: int):
+    """Raise TimeoutError if the block takes longer than *seconds*."""
+    def _handler(signum, frame):
+        raise TimeoutError(f"RAGAS evaluation timed out after {seconds}s")
+
+    old = signal.signal(signal.SIGALRM, _handler)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
 
 
 class RAGEvaluator:
@@ -26,10 +44,9 @@ class RAGEvaluator:
         logger.info("Initialising RAGEvaluator")
         self._initialised = False
         try:
-            from ragas.metrics import answer_relevancy, faithfulness  # noqa: F401
+            from ragas.metrics import faithfulness  # noqa: F401
 
             self._faithfulness = faithfulness
-            self._answer_relevancy = answer_relevancy
             self._initialised = True
             logger.info("RAGAS metrics loaded")
         except Exception:
@@ -57,12 +74,9 @@ class RAGEvaluator:
             from datasets import Dataset
             from langchain_ollama import ChatOllama
             from ragas import evaluate
-            from ragas.metrics import answer_relevancy, faithfulness
+            from ragas.metrics import faithfulness
 
-            llm = ChatOllama(
-                model=OLLAMA_MODEL,
-                temperature=0.0,
-            )
+            llm = ChatOllama(model=OLLAMA_MODEL, temperature=0.0)
 
             data = {
                 "question": [question],
@@ -73,15 +87,20 @@ class RAGEvaluator:
                 data["ground_truth"] = [ground_truth]
 
             dataset = Dataset.from_dict(data)
-            result = evaluate(
-                dataset,
-                metrics=[faithfulness, answer_relevancy],
-                llm=llm,
-            )
+
+            with _timeout(EVAL_TIMEOUT_SECONDS):
+                result = evaluate(
+                    dataset,
+                    metrics=[faithfulness],
+                    llm=llm,
+                )
 
             scores = {k: float(v) for k, v in result.items() if isinstance(v, (int, float))}
             logger.info("RAGAS scores: {}", scores)
             return scores
+        except TimeoutError:
+            logger.warning("RAGAS evaluation timed out after {}s", EVAL_TIMEOUT_SECONDS)
+            return {}
         except Exception:
             logger.exception("RAGAS evaluation failed")
             return {}
