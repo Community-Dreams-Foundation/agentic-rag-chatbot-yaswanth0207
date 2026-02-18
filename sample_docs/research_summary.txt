@@ -1,0 +1,28 @@
+Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks
+Summary of Lewis et al. (2020) — arXiv:2005.11401
+
+Abstract
+
+Large pre-trained language models store factual knowledge in their parameters but struggle to access and manipulate that knowledge precisely. Retrieval-Augmented Generation (RAG) combines a pre-trained parametric model (the generator) with a non-parametric retrieval component (the retriever) that indexes a large external knowledge source such as Wikipedia. This hybrid architecture allows the model to condition its outputs on retrieved documents, producing more factual, specific, and verifiable responses than purely parametric models.
+
+Architecture
+
+The RAG model consists of two components: (1) a Dense Passage Retriever (DPR) based on BERT that encodes queries and documents into a shared embedding space and retrieves the top-k most relevant passages, and (2) a BART-large sequence-to-sequence generator that conditions on both the input query and the retrieved passages to produce the final output. During training, the retriever and generator are jointly fine-tuned end-to-end.
+
+Two variants are proposed: RAG-Sequence, which uses the same retrieved document set to generate the entire output sequence, and RAG-Token, which can use different documents per output token. RAG-Sequence generally performs better for factoid question answering, while RAG-Token shows advantages for longer-form generation tasks.
+
+Key Results
+
+RAG achieves state-of-the-art results on three open-domain question answering benchmarks as of 2020: Natural Questions (44.5 exact match), TriviaQA (56.8 exact match), and WebQuestions (45.5 exact match). On the Jeopardy question generation task, human evaluators rated RAG outputs as more factual and specific than those from a comparable BART model 42.7% of the time, versus only 7.5% for pure BART.
+
+The authors demonstrate that RAG can be updated without retraining: swapping the retrieval index (e.g., replacing a 2018 Wikipedia dump with a 2020 version) immediately improves the model's answers to time-sensitive questions, without any gradient updates. This is a significant advantage over purely parametric models, which require expensive fine-tuning to incorporate new knowledge.
+
+Limitations
+
+The paper identifies several limitations. First, the retriever uses a static BERT-based encoder that is not updated during inference, meaning retrieval quality depends heavily on the initial training. Second, the model's performance degrades when the answer requires multi-hop reasoning across multiple documents, as the retriever selects passages independently. Third, the computational cost of retrieval adds latency: each query requires a nearest-neighbor search over millions of document embeddings.
+
+The authors note that the knowledge source is limited to text-based documents and does not handle structured data, images, or tables. Future work directions include multi-modal retrieval, improved multi-hop reasoning, and more efficient indexing structures such as product quantization or hierarchical navigable small-world graphs.
+
+Impact
+
+The RAG paper has been cited over 3,200 times as of 2024 and is widely considered a foundational work in the retrieval-augmented generation paradigm. The architecture has been adopted and extended by systems including LlamaIndex, LangChain, and Haystack. The core insight — that combining retrieval with generation yields more factual, grounded, and updatable outputs — has become a standard design pattern in production AI systems for enterprise search, customer support, and knowledge management.

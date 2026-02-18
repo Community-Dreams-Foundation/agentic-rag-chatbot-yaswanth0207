@@ -1,0 +1,55 @@
+{
+  "implemented_features": [
+    "A",
+    "B",
+    "C"
+  ],
+  "qa": [
+    {
+      "question": "What does NovaTech Solutions do and when was it founded?",
+      "answer": "According to [source=sample.txt  chunk_id=8e8348d2  page=0], NovaTech Solutions is a pioneering artificial intelligence company that was founded in 2019 in Austin, Texas. The company's flagship product, FlowAI, is an AI-powered platform for logistics and supply chain optimization.\n\n[Source: sample.txt  chunk_id=69e12944  page=0]",
+      "citations": [
+        {
+          "source": "sample.txt",
+          "locator": "8e8348d2",
+          "snippet": "NovaTech Solutions \u2014 Company Profile\n\nNovaTech Solutions is a pioneering artificial intelligence company founded in 2019 in Austin, Texas, by CEO Sarah Chen and CTO Marcus Rodriguez. Born out of a sha"
+        }
+      ]
+    },
+    {
+      "question": "How much funding has NovaTech raised and who led the round?",
+      "answer": "According to [2] source=sample.txt  chunk_id=69e12944  page=0, NovaTech has raised a total of $57 million in funding. The breakdown is as follows:\n\n- Series A: $12 million (2020) - Led by Andreessen Horowitz\n- Series B: $45 million (2022) - Led by Sequoia Capital, with participation from Tiger Global and Y Combinator's Continuity Fund.\n\nNote that the total funding amount mentioned in [2] is different from the one stated in [1], which mentions $12 million for Series A.",
+      "citations": [
+        {
+          "source": "sample.txt",
+          "locator": "8e8348d2",
+          "snippet": "NovaTech Solutions \u2014 Company Profile\n\nNovaTech Solutions is a pioneering artificial intelligence company founded in 2019 in Austin, Texas, by CEO Sarah Chen and CTO Marcus Rodriguez. Born out of a sha"
+        }
+      ]
+    },
+    {
+      "question": "What is the name of NovaTech key product and how many clients use it?",
+      "answer": "According to [source: sample.txt, chunk_id=8e8348d2, page=0], the name of NovaTech's key product is FlowAI. It is used by more than 300 enterprise clients worldwide.",
+      "citations": [
+        {
+          "source": "sample.txt",
+          "locator": "8e8348d2",
+          "snippet": "NovaTech Solutions \u2014 Company Profile\n\nNovaTech Solutions is a pioneering artificial intelligence company founded in 2019 in Austin, Texas, by CEO Sarah Chen and CTO Marcus Rodriguez. Born out of a sha"
+        }
+      ]
+    }
+  ],
+  "demo": {
+    "weather_explanation": "Hello there! I'm delighted to share with you the latest weather trends and insights for London, UK. Looking at the temperature data over the past three days, it's clear that a significant warming trend has been observed. The average temperature on February 20th reached as high as 8.89\u00b0C, which is significantly higher than the previous day's average of 6.44\u00b0C. This rapid increase in temperature is quite notable and stands out from the rest of the data.\n\nOn closer inspection, we can identify two anomalous days: February 18th and February 19th. Although they didn't have unusually high temperatures, their precipitation levels were significantly lower than the average. The low rainfall on these days suggests that a dry spell has been affecting London, which might be related to the prevailing weather patterns in the region.\n\nMoving on to precipitation and wind patterns, it's worth noting that the overall trend is quite dry, with most days experiencing minimal rainfall. However, there are some fluctuations in wind speed, with an average of 13.5 km/h over the past three days. This moderate wind speed shouldn't pose any significant issues for daily activities.\n\nLooking ahead to the next few days, it's likely that the temperature will continue to rise, and we might see more unsettled weather patterns. I recommend checking the forecast regularly for updates on precipitation and wind speeds. If you're planning outdoor activities, consider dressing in layers to adapt to the changing temperatures. Stay dry and stay safe!",
+    "memory_writes": [
+      {
+        "target": "USER",
+        "summary": "User is a senior data engineer at Acme Corp working on ETL pipelines"
+      },
+      {
+        "target": "COMPANY",
+        "summary": "Company recently migrated from AWS to GCP"
+      }
+    ]
+  }
+}

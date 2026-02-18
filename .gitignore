@@ -1,0 +1,17 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# IDEs and Editors
+.visualstudio/
+.vscode/
+.idea/
+*.swp
+*.swo
+.venv
