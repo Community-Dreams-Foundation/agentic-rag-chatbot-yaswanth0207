@@ -1,4 +1,4 @@
-"""End-to-end sanity check that exercises all three features."""
+"""End-to-end sanity check that exercises all core features."""
 
 import json
 import os
@@ -20,14 +20,12 @@ from tools.weather_tool import WeatherTool
 
 Path("artifacts").mkdir(exist_ok=True)
 
-# Step 1: Ingest
 print("Step 1: Ingesting sample document...")
 ingestor = DocumentIngestor()
 ingestor.clear()
 chunks = ingestor.ingest_file("sample_docs/sample.txt")
 print(f"  Indexed {chunks} chunks")
 
-# Step 2: RAG pipeline
 print("Step 2: Running RAG pipeline...")
 retriever = HybridRetriever()
 retriever.build_bm25_index()
@@ -58,7 +56,6 @@ for q in questions:
     qa_results.append({"question": q, "answer": response.answer, "citations": cit_list})
     print(f"  Q: {q[:60]}... -> {len(cit_list)} citations")
 
-# Step 3: Memory
 print("Step 3: Testing memory writer...")
 writer = MemoryWriter()
 memory_writes = []
@@ -95,13 +92,11 @@ if not memory_writes:
     ]
     print("  (Wrote fallback memory entries)")
 
-# Step 4: Weather
 print("Step 4: Testing weather tool...")
 weather = WeatherTool()
 result = weather.run("London", days=3)
 print(f"  Weather explanation: {result.explanation[:100]}...")
 
-# Output
 output = {
     "implemented_features": ["A", "B", "C"],
     "qa": qa_results,

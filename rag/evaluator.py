@@ -1,8 +1,4 @@
-"""RAG evaluation using RAGAS metrics.
-
-Measures faithfulness and answer relevancy to provide an objective
-quality signal for the retrieval-augmented generation pipeline.
-"""
+"""RAG evaluation using RAGAS faithfulness metric."""
 
 from __future__ import annotations
 
@@ -12,10 +8,6 @@ from contextlib import contextmanager
 
 from loguru import logger
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
 OLLAMA_MODEL = "llama3.2"
 EVAL_TIMEOUT_SECONDS = 90
 
@@ -24,10 +16,12 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 @contextmanager
 def _timeout(seconds: int):
-    """Raise TimeoutError if the block takes longer than *seconds*."""
+    """Raise TimeoutError if the block exceeds *seconds* (Unix only; no-op on Windows)."""
+    if not hasattr(signal, "SIGALRM"):
+        yield
+        return
     def _handler(signum, frame):
         raise TimeoutError(f"RAGAS evaluation timed out after {seconds}s")
-
     old = signal.signal(signal.SIGALRM, _handler)
     signal.alarm(seconds)
     try:
@@ -38,64 +32,67 @@ def _timeout(seconds: int):
 
 
 class RAGEvaluator:
-    """Evaluates RAG pipeline quality using RAGAS faithfulness & relevancy."""
+    """Evaluates RAG pipeline quality using RAGAS faithfulness."""
 
     def __init__(self) -> None:
         logger.info("Initialising RAGEvaluator")
         self._initialised = False
         try:
             from ragas.metrics import faithfulness  # noqa: F401
-
             self._faithfulness = faithfulness
             self._initialised = True
             logger.info("RAGAS metrics loaded")
         except Exception:
             logger.warning("RAGAS metrics could not be loaded – evaluation disabled")
 
-    # ------------------------------------------------------------------
-    # Evaluate
-    # ------------------------------------------------------------------
-
     def evaluate(
-        self,
-        question: str,
-        answer: str,
-        contexts: list[str],
-        ground_truth: str = "",
+        self, question: str, answer: str, contexts: list[str], ground_truth: str = "",
     ) -> dict[str, float]:
-        """Run RAGAS evaluation and return a dict of metric scores.
-
-        Returns an empty dict on failure (evaluation is non-critical).
-        """
+        """Run RAGAS evaluation. Returns empty dict on failure (non-critical)."""
         if not self._initialised:
             return {}
-
         try:
             from datasets import Dataset
             from langchain_ollama import ChatOllama
             from ragas import evaluate
             from ragas.metrics import faithfulness
 
-            llm = ChatOllama(model=OLLAMA_MODEL, temperature=0.0)
+            def _is_finite_scalar(v):
+                try:
+                    f = float(v)
+                    return f == f  # exclude NaN
+                except (TypeError, ValueError):
+                    return False
 
-            data = {
-                "question": [question],
-                "answer": [answer],
-                "contexts": [contexts],
+            llm = ChatOllama(model=OLLAMA_MODEL, temperature=0.0)
+            data: dict = {
+                "user_input": [question],
+                "response": [answer],
+                "retrieved_contexts": [contexts],
             }
             if ground_truth:
-                data["ground_truth"] = [ground_truth]
-
-            dataset = Dataset.from_dict(data)
+                data["reference"] = [ground_truth]
 
             with _timeout(EVAL_TIMEOUT_SECONDS):
                 result = evaluate(
-                    dataset,
+                    Dataset.from_dict(data),
                     metrics=[faithfulness],
                     llm=llm,
+                    show_progress=False,
                 )
 
-            scores = {k: float(v) for k, v in result.items() if isinstance(v, (int, float))}
+            if hasattr(result, "_repr_dict"):
+                scores = {
+                    k: float(v) for k, v in result._repr_dict.items()
+                    if _is_finite_scalar(v)
+                }
+            elif hasattr(result, "scores") and result.scores:
+                scores = {
+                    k: float(v) for k, v in result.scores[0].items()
+                    if _is_finite_scalar(v)
+                }
+            else:
+                scores = {}
             logger.info("RAGAS scores: {}", scores)
             return scores
         except TimeoutError:

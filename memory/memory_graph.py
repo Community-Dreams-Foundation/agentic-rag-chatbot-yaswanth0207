@@ -1,11 +1,8 @@
 """Agentic memory decision flow using LangGraph.
 
-Implements a three-node state machine:
-  analyze → deduplicate → write
-
+Three-node state machine: analyze → deduplicate → write.
 The LLM decides whether a conversation turn contains a fact worth
-persisting, deduplicates against the existing memory file, and
-(if confident enough) appends the fact.
+persisting, deduplicates against existing memory, and appends if confident.
 """
 
 from __future__ import annotations
@@ -21,10 +18,6 @@ from langgraph.graph import END, StateGraph
 from loguru import logger
 
 from models.schemas import MemoryDecision
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
 
 OLLAMA_MODEL = "llama3.2"
 CONFIDENCE_THRESHOLD = 0.7
@@ -62,8 +55,6 @@ Now extract from the conversation above. Reply with ONLY the JSON:"""
 
 
 class MemoryGraphState(TypedDict):
-    """Typed state flowing through the LangGraph state machine."""
-
     user_message: str
     assistant_response: str
     decision: MemoryDecision | None
@@ -76,66 +67,43 @@ class MemoryGraph:
 
     def __init__(self) -> None:
         logger.info("Building MemoryGraph …")
-        self._llm = ChatOllama(
-            model=OLLAMA_MODEL,
-            temperature=0.0,
-        )
+        self._llm = ChatOllama(model=OLLAMA_MODEL, temperature=0.0)
         self._graph = self._build_graph()
         logger.info("MemoryGraph compiled")
 
-    # ------------------------------------------------------------------
-    # Graph construction
-    # ------------------------------------------------------------------
-
     def _build_graph(self) -> StateGraph:
         graph = StateGraph(MemoryGraphState)
-
         graph.add_node("analyze", self._analyze_node)
         graph.add_node("deduplicate", self._deduplicate_node)
         graph.add_node("write", self._write_node)
-
         graph.set_entry_point("analyze")
         graph.add_conditional_edges(
-            "analyze",
-            self._should_deduplicate,
+            "analyze", self._should_deduplicate,
             {"deduplicate": "deduplicate", "end": END},
         )
         graph.add_edge("deduplicate", "write")
         graph.add_edge("write", END)
-
         return graph.compile()
 
-    # ------------------------------------------------------------------
-    # Nodes
-    # ------------------------------------------------------------------
-
     def _analyze_node(self, state: MemoryGraphState) -> dict:
-        """Ask the LLM to extract a memory fact as JSON."""
         try:
             prompt = ChatPromptTemplate.from_template(ANALYZE_PROMPT)
-            chain = prompt | self._llm
-            result = chain.invoke(
-                {
-                    "user_message": state["user_message"],
-                    "assistant_response": state["assistant_response"],
-                },
-            )
-            raw = result.content or ""  # type: ignore[union-attr]
-            decision = self._parse_decision(raw)
+            result = (prompt | self._llm).invoke({
+                "user_message": state["user_message"],
+                "assistant_response": state["assistant_response"],
+            })
+            decision = self._parse_decision(result.content or "")  # type: ignore[union-attr]
             logger.info("Memory decision: {}", decision)
             return {"decision": decision}
         except Exception as exc:
             logger.exception("Analyze node failed")
             return {
-                "decision": MemoryDecision(
-                    should_write=False, target="none", summary="", confidence=0.0,
-                ),
+                "decision": MemoryDecision(should_write=False, target="none", summary="", confidence=0.0),
                 "error": str(exc),
             }
 
     @staticmethod
     def _parse_decision(raw: str) -> MemoryDecision:
-        """Robustly parse JSON from the LLM response."""
         match = re.search(r"\{.*\}", raw, re.DOTALL)
         if match:
             try:
@@ -148,23 +116,19 @@ class MemoryGraph:
                 )
             except (json.JSONDecodeError, ValueError):
                 pass
-        return MemoryDecision(
-            should_write=False, target="none", summary="", confidence=0.0,
-        )
+        return MemoryDecision(should_write=False, target="none", summary="", confidence=0.0)
 
     def _deduplicate_node(self, state: MemoryGraphState) -> dict:
-        """Check whether the fact already exists using keyword overlap."""
+        """Check whether the fact already exists via keyword overlap."""
         decision: MemoryDecision = state["decision"]  # type: ignore[assignment]
         try:
             mem_path = self._target_path(decision.target)
             existing = mem_path.read_text(encoding="utf-8") if mem_path.exists() else ""
-
             existing_facts = [
                 line.strip().lstrip("- ").lower()
                 for line in existing.splitlines()
                 if line.strip().startswith("- ")
             ]
-
             if not existing_facts:
                 return {"decision": decision}
 
@@ -175,28 +139,20 @@ class MemoryGraph:
                     continue
                 overlap = len(new_words & fact_words) / max(len(new_words), len(fact_words))
                 if overlap >= SIMILARITY_THRESHOLD:
-                    logger.info(
-                        "Duplicate detected (overlap={:.0%}): '{}' ~ '{}'",
-                        overlap, decision.summary, fact,
-                    )
+                    logger.info("Duplicate detected (overlap={:.0%}): '{}' ~ '{}'",
+                                overlap, decision.summary, fact)
                     decision.should_write = False
                     return {"decision": decision}
-
             return {"decision": decision}
         except Exception as exc:
             logger.exception("Dedup node failed")
             return {"decision": decision, "error": str(exc)}
 
     def _write_node(self, state: MemoryGraphState) -> dict:
-        """Append the fact to the appropriate memory file."""
         decision: MemoryDecision = state["decision"]  # type: ignore[assignment]
         if not decision.should_write or decision.confidence < CONFIDENCE_THRESHOLD:
-            logger.info(
-                "Write skipped (should_write={}, conf={:.2f})",
-                decision.should_write, decision.confidence,
-            )
+            logger.info("Write skipped (should_write={}, conf={:.2f})", decision.should_write, decision.confidence)
             return {"written": False}
-
         try:
             mem_path = self._target_path(decision.target)
             with open(mem_path, "a", encoding="utf-8") as f:
@@ -207,10 +163,6 @@ class MemoryGraph:
             logger.exception("Write node failed")
             return {"written": False, "error": str(exc)}
 
-    # ------------------------------------------------------------------
-    # Routing
-    # ------------------------------------------------------------------
-
     @staticmethod
     def _should_deduplicate(state: MemoryGraphState) -> str:
         decision = state.get("decision")
@@ -220,28 +172,18 @@ class MemoryGraph:
 
     @staticmethod
     def _target_path(target: str) -> Path:
-        if target == "company":
-            return COMPANY_MEMORY_PATH
-        return USER_MEMORY_PATH
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+        return COMPANY_MEMORY_PATH if target == "company" else USER_MEMORY_PATH
 
     def run(self, user_message: str, assistant_response: str) -> tuple[bool, str]:
         """Execute the full memory graph and return (written, target)."""
         initial_state: MemoryGraphState = {
-            "user_message": user_message,
-            "assistant_response": assistant_response,
-            "decision": None,
-            "written": False,
-            "error": None,
+            "user_message": user_message, "assistant_response": assistant_response,
+            "decision": None, "written": False, "error": None,
         }
         try:
             result = self._graph.invoke(initial_state)
             written = bool(result.get("written", False))
-            decision = result.get("decision")
-            target = decision.target if decision else "none"  # type: ignore[union-attr]
+            target = result.get("decision").target if result.get("decision") else "none"  # type: ignore[union-attr]
             return written, target
         except Exception:
             logger.exception("MemoryGraph execution failed")

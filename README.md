@@ -49,15 +49,15 @@ A production-quality Retrieval-Augmented Generation chatbot with **agentic memor
 
 | Field | Value |
 |---|---|
-| **Full Name** | |
-| **Email** | |
-| **GitHub Username** | |
+| **Full Name** | YASWANTH CHOWDARY MEDARAMETLA |
+| **Email** | yaswanthmedarametla02@gmail.com|
+| **GitHub Username** | yaswanth0207 |
 
 ---
 
 ## Video Walkthrough
 
-PASTE YOUR LINK HERE
+https://drive.google.com/file/d/1WuZv1t5dlp1hmNBRJRmKYi1txXGbaWdU/view?usp=drive_link
 
 ---
 
@@ -68,7 +68,7 @@ PASTE YOUR LINK HERE
 ```bash
 # Clone and enter the repo
 git clone <repo-url>
-cd agentic-rag-chatbot
+cd agentic-rag-chatbot-yaswanth0207
 
 # Create a Python 3.11 or 3.12 virtual environment
 python3.12 -m venv .venv
@@ -103,6 +103,17 @@ make sanity
 bash scripts/sanity_check.sh
 ```
 
+### Evaluation Harness
+
+Runs `EVAL_QUESTIONS.md` (or a subset), gets answers + citations, and asserts **has citations** and optionally **expected source in citations**. Requires Ollama running and documents already indexed (e.g. upload `sample_docs/sample.txt` in the app first).
+
+```bash
+python scripts/run_eval_harness.py                      # Section A (RAG + citations)
+python scripts/run_eval_harness.py --section A,B        # Sections A and B
+python scripts/run_eval_harness.py --questions 1,2,4   # Specific questions
+python scripts/run_eval_harness.py --expected-source sample.txt --verbose
+```
+
 ---
 
 ## Features
@@ -116,6 +127,7 @@ bash scripts/sanity_check.sh
 - **Grounded answering**: Ollama (Llama 3.2) with enforced inline citations
 - **Clean citation display**: All `[source: ...]` markers stripped from streamed output; clickable citation expanders show full chunk text
 - **Duplicate-safe indexing**: Re-uploading the same file skips re-indexing
+- **File management**: Per-file **Delete** and **Inspect chunks** in Document Manager; re-index = delete + upload again
 
 ### Feature B — Agentic Memory System
 
@@ -139,7 +151,8 @@ bash scripts/sanity_check.sh
 
 - **Conversation-aware follow-ups**: Last 3 turns injected as context for multi-turn dialogue
 - **Pipeline trace panel**: Timing breakdown for Retrieval, Rerank, Generation, and Memory stages
-- **Retrieval transparency panel**: Shows all retrieved chunks, rerank scores, and which were cited
+- **Query rewriting**: Follow-up messages (e.g. "And the limitations?") are rewritten into standalone search queries for retrieval; original message still used for the answer; shown in Pipeline Trace and Retrieval Transparency when different
+- **Retrieval transparency panel**: Shows all retrieved chunks, rerank scores, and which were cited (and search query used when rewritten)
 - **RAGAS evaluation**: Toggle-activated faithfulness scoring with progress bar and quality labels
 - **Smart query suggestions**: Auto-generated question buttons after document indexing
 - **Export chat**: Download full conversation as Markdown
@@ -193,6 +206,7 @@ bash scripts/sanity_check.sh
 │   ├── retriever.py          # Hybrid BM25 + semantic retrieval
 │   ├── reranker.py           # FlashRank cross-encoder reranking
 │   ├── answerer.py           # Streaming answer generation + citation cleaning
+│   ├── query_rewriter.py     # LLM rewrite of message + conversation → standalone search query
 │   └── evaluator.py          # RAGAS faithfulness evaluation
 ├── memory/
 │   ├── __init__.py
@@ -207,6 +221,7 @@ bash scripts/sanity_check.sh
 ├── scripts/
 │   ├── run_sanity.py         # End-to-end sanity check runner
 │   ├── sanity_check.sh       # Shell wrapper for sanity check
+│   ├── run_eval_harness.py   # EVAL_QUESTIONS runner: answers + assert citations / expected source
 │   └── verify_output.py      # Sanity output JSON validator
 ├── sample_docs/
 │   ├── sample.txt            # NovaTech Solutions company profile

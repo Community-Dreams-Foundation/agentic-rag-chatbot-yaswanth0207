@@ -1,8 +1,4 @@
-"""Hybrid BM25 + semantic retrieval using LangChain EnsembleRetriever.
-
-Combines keyword-based BM25 scoring with ChromaDB dense-vector search,
-fusing results with configurable weights for best-of-both-worlds retrieval.
-"""
+"""Hybrid BM25 + semantic retrieval using LangChain EnsembleRetriever."""
 
 from __future__ import annotations
 
@@ -18,10 +14,6 @@ from llama_index.embeddings.fastembed import FastEmbedEmbedding
 from loguru import logger
 
 from models.schemas import Chunk
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
 
 CHROMA_PERSIST_DIR = "./chroma_db"
 CHROMA_COLLECTION = "rag_documents"
@@ -50,37 +42,25 @@ class HybridRetriever:
 
     def __init__(self, bm25_weight: float = DEFAULT_BM25_WEIGHT) -> None:
         logger.info("Initialising HybridRetriever …")
-
         self._chroma_client = chromadb.PersistentClient(path=CHROMA_PERSIST_DIR)
-        self._collection = self._chroma_client.get_or_create_collection(
-            name=CHROMA_COLLECTION,
-        )
-
+        self._collection = self._chroma_client.get_or_create_collection(name=CHROMA_COLLECTION)
         self._embed_fn = _FastEmbedLangChain()
         self._lc_vectorstore = Chroma(
             client=self._chroma_client,
             collection_name=CHROMA_COLLECTION,
             embedding_function=self._embed_fn,
         )
-
         self._bm25_weight = bm25_weight
         self._semantic_weight = 1.0 - bm25_weight
         self._bm25_retriever: BM25Retriever | None = None
         self._ensemble: EnsembleRetriever | None = None
-
         self.build_bm25_index()
         logger.info("HybridRetriever ready")
 
-    # ------------------------------------------------------------------
-    # BM25 index construction
-    # ------------------------------------------------------------------
-
     def build_bm25_index(self) -> None:
-        """Fetch all docs from ChromaDB and build / rebuild the BM25 index."""
+        """Fetch all docs from ChromaDB and build/rebuild the BM25 index."""
         try:
-            results = self._collection.get(
-                include=["documents", "metadatas"],
-            )
+            results = self._collection.get(include=["documents", "metadatas"])
             documents = results.get("documents") or []
             metadatas = results.get("metadatas") or []
             ids = results.get("ids") or []
@@ -100,9 +80,7 @@ class HybridRetriever:
             ]
 
             self._bm25_retriever = BM25Retriever.from_documents(lc_docs, k=10)
-            semantic_retriever = self._lc_vectorstore.as_retriever(
-                search_kwargs={"k": 10},
-            )
+            semantic_retriever = self._lc_vectorstore.as_retriever(search_kwargs={"k": 10})
             self._ensemble = EnsembleRetriever(
                 retrievers=[self._bm25_retriever, semantic_retriever],
                 weights=[self._bm25_weight, self._semantic_weight],
@@ -111,20 +89,26 @@ class HybridRetriever:
         except Exception:
             logger.exception("Failed to build BM25 index")
 
-    # ------------------------------------------------------------------
-    # Search
-    # ------------------------------------------------------------------
-
-    def hybrid_search(self, query: str, top_k: int = 5) -> list[Chunk]:
-        """Run hybrid BM25 + semantic search and return Chunk objects."""
+    def hybrid_search(
+        self, query: str, top_k: int = 5, filter_sources: list[str] | None = None
+    ) -> list[Chunk]:
         if self._ensemble is None:
             logger.warning("Ensemble retriever not ready – returning empty")
             return []
-
         try:
+            fetch_k = max(top_k * 4, 20) if filter_sources else top_k
             results = self._ensemble.invoke(query)
-            chunks = self._docs_to_chunks(results[:top_k])
-            logger.info("Hybrid search '{}' → {} chunks", query[:60], len(chunks))
+            chunks = self._docs_to_chunks(results[:fetch_k])
+            if filter_sources:
+                allowed = set(filter_sources)
+                chunks = [c for c in chunks if c.source in allowed]
+                chunks = chunks[:top_k]
+            else:
+                chunks = chunks[:top_k]
+            logger.info(
+                "Hybrid search '{}' → {} chunks (filter_sources={})",
+                query[:60], len(chunks), filter_sources[:2] if filter_sources else None,
+            )
             return chunks
         except Exception as exc:
             if "does not exist" in str(exc):
@@ -134,31 +118,21 @@ class HybridRetriever:
             logger.exception("Hybrid search failed for '{}'", query[:60])
             return []
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
     @staticmethod
     def _docs_to_chunks(docs: list[LCDocument]) -> list[Chunk]:
-        """Convert LangChain Documents to our Chunk schema."""
-        chunks: list[Chunk] = []
-        for doc in docs:
-            meta = doc.metadata or {}
-            chunks.append(
-                Chunk(
-                    text=doc.page_content,
-                    source=meta.get("source", "unknown"),
-                    chunk_id=meta.get("chunk_id", meta.get("id", str(uuid.uuid4())[:8])),
-                    page_number=int(meta.get("page_number", 0)),
-                )
+        return [
+            Chunk(
+                text=doc.page_content,
+                source=(doc.metadata or {}).get("source", "unknown"),
+                chunk_id=(doc.metadata or {}).get("chunk_id", (doc.metadata or {}).get("id", str(uuid.uuid4())[:8])),
+                page_number=int((doc.metadata or {}).get("page_number", 0)),
             )
-        return chunks
+            for doc in docs
+        ]
 
     def reset(self) -> None:
         """Re-bind to the (possibly recreated) ChromaDB collection and clear indexes."""
-        self._collection = self._chroma_client.get_or_create_collection(
-            name=CHROMA_COLLECTION,
-        )
+        self._collection = self._chroma_client.get_or_create_collection(name=CHROMA_COLLECTION)
         self._lc_vectorstore = Chroma(
             client=self._chroma_client,
             collection_name=CHROMA_COLLECTION,
@@ -170,7 +144,6 @@ class HybridRetriever:
         logger.info("HybridRetriever reset — re-bound to collection")
 
     def set_weights(self, bm25_weight: float) -> None:
-        """Update fusion weights and rebuild the ensemble retriever."""
         self._bm25_weight = bm25_weight
         self._semantic_weight = 1.0 - bm25_weight
         self.build_bm25_index()
